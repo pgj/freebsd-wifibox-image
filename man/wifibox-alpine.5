@@ -1,4 +1,4 @@
-.Dd December 23, 2021
+.Dd February 8, 2022
 .Dt WIFIBOX-ALPINE 5
 .Os
 .Sh NAME
@@ -55,7 +55,8 @@ Everything that needs to be modified during the guest's run time is
 stored on dedicated file systems that are either memory-backed or
 shared with the host.  This prevents the guest from damaging the
 system files on sudden shutdowns, which may occur due to short and
-strict time limits placed on the spin-down sequence.
+strict time limits placed on the spin-down sequence, and lack of
+journaling enabled.
 .Pp
 For the same reasons, it is recommended to restore the original
 mounting strategy once all the changes have been made on the guest.
@@ -145,44 +146,6 @@ or
 .Pa /var/log/messages
 so that the internal state of the guest can be tracked by accessing
 these files on the host.
-.Sh INSTALLING OR REMOVING PACKAGES
-The list of installed packages can be queried by the
-.Sy apk
-(Alpine Package Keeper) tool.  This tool is going to be used for the
-rest of the section.
-.Bd -literal -offset indent
-# apk list --installed
-.Ed
-.Pp
-Before installing any package, it is recommended to get the latest
-version of the database.  The
-.Sy apk
-tool stores the list of currently used package repositories in the
-.Pa /etc/apk/repositories
-file.
-.Bd -literal -offset indent
-# apk update
-.Ed
-.Pp
-Individual packages can be then installed by the
-.Cm add
-command, assuming that they are available.  For example, in case of
-the
-.Sy wireless-tools
-package, this works as follows:
-.Bd -literal -offset indent
-# apk add wireless-tools
-.Ed
-.Pp
-Note that the disk space allocated for the guest is quite small, so
-choose the additional tools to be installed carefully and wisely.
-.Pp
-The unneeded packages can be removed by the
-.Cm del
-command.
-.Bd -literal -offset indent
-# apk del wireless-tools
-.Ed
 .Sh STARTING, STOPPING, AND RESTARTING SERVICES
 Every service running on the guest can be managed by the
 .Sy rc-service
@@ -219,6 +182,216 @@ service.
 .Pp
 These commands can help with troubleshooting and restoring the
 respective services in case of failures.
+.Sh RESIZING THE FILE SYSTEM
+The size of the disk image is optimized, and no free space left on the
+root file system.  In result, installation of further packages or
+performing a system upgrade requires changing the size of the root
+file system as well as that of the enclosing disk image.  This can be
+achieved with the help of specific tools, described below shortly.
+.Pp
+Such operations must always be considered on two levels: the size of
+the disk image needs to be changed on the host, and the size of the
+file systems needs to be changed on the guest.  The order of the
+corresponding commands must always reflect the direction of the change
+in size to avoid losing data.
+.Pp
+For growing the root file system, increase the size of the disk image
+to the desired capacity with the
+.Xr truncate 1
+utility.  For example, consider extending the virtual disk to 1
+gigabyte.
+.Bd -literal -offset indent
+# truncate -s 1G disk.img
+.Ed
+.Pp
+The guest has to be restarted to notice the change in the disk
+parameters.
+.Bd -literal -offset indent
+# wifibox restart guest
+.Ed
+.Pp
+Once the
+.Cm restart
+operation completed, the interactive
+.Cm cfdisk
+utility on the guest can be used to resize the partition of the root
+file system,
+.Pa /dev/vda2 .
+.Bd -literal -offset indent
+# cfdisk
+.Ed
+.Pp
+The guest has to be restarted again to pick up the changes in the
+partition size.
+.Bd -literal -offset indent
+# wifibox restart guest
+.Ed
+.Pp
+The
+.Cm resize2fs
+utility on the guest supports growing the root file system while it is
+in use, however it must be mounted writable first.  The command will
+automatically extends the file system's size to match with the size of
+the corresponding partition, which has been grown in the previous
+step.  After completion, the file system is ready for use.
+.Bd -literal -offset indent
+# mount -o remount,rw /
+# resize2fs /dev/vda2
+.Ed
+.Pp
+For shrinking the root file system, the size of the root file system
+has to be decreased first.  This can be implemented by the
+.Cm resize2fs
+utility, but it supports shrinking only when the underlying file
+system is not mounted.  In case of the root file system a way to
+achieve this is to mirror its contents in the memory and trigger all
+the processes to re-load themselves from there.  That is why this
+operation requires the guest to be configured with more memory, e.g. 1
+GB, otherwise it may fail.
+.Pp
+Through the following set of commands, a tmpfs-backed file system is
+created and populated with the contents of the root so it could take
+over its place in the next steps.
+.Bd -literal -offset indent
+mkdir /tmp/tmproot
+mount -t tmpfs tmpfs /tmp/tmproot
+for dir in oldroot dev proc sys run tmp boot; do \\
+  mkdir /tmp/tmproot/$dir; done
+for dir in bin etc home lib media mnt opt root sbin srv usr var; do \\
+  cp -a /$dir /tmp/tmproot/$dir; done
+.Ed
+.Pp
+Then the
+.Cm pivot_root
+and
+.Cm mount
+commands are employed to switch to the freshly built root file system
+and migrate all the existing mount points there.  The previous root
+file system becomes available under the path
+.Pa /oldroot .
+.Bd -literal -offset indent
+cd /tmp/tmproot
+pivot_root . oldroot
+for dir in boot dev proc run sys media/etc media/var; do \\
+  mount --move /oldroot/$dir /$dir; done
+mount -t tmpfs tmpfs /tmp
+.Ed
+.Pp
+Since all the services, including the
+.Cm init
+process with PID 1, have been launched from the old root,
+.Cm init
+must be told to restart itself by sending the QUIT signal.  In
+consequence, all the other services will also be restarted and the
+user is logged out.
+.Bd -literal -offset indent
+# kill -QUIT 1
+.Ed
+.Pp
+Login and restart the
+.Cm networking
+service to restore the network connection to the outside world.
+.Bd -literal -offset indent
+# rc-service networking restart
+.Ed
+.Pp
+Now it should be possible to detach the old root file system.
+.Bd -literal -offset indent
+# umount /oldroot
+.Ed
+.Pp
+In case this previous command fails, it is recommended to use the
+.Cm fuser
+utility to obtain the list of processes, by their IDs, that keep files
+open on the file system.
+.Bd -literal -offset indent
+# fuser -m /oldroot
+.Ed
+.Pp
+If the old root file system has been successfully unmounted, it must
+be checked for errors first and it must be marked clean, otherwise
+.Cm resize2fs
+refuses to modify it.  Then the
+.Cm resize2fs
+command may be called with the new file system size, which shall not
+be smaller than the space currently occupied by files.  That is why it
+is a good idea to consult with the output of the
+.Cm df
+utility before moving forward.  If the file system cannot be shrunk to
+the specified size,
+.Cm resize2fs
+will exit with an error and recommends the user to repair with file
+system with
+.Cm e2fsck .
+.Bd -literal -offset indent
+# e2fsck -f /dev/vda2
+# resize2fs -f /dev/vda2 345M
+.Ed
+.Pp
+After the successful shrinking of the file system, the
+.Cm cfdisk
+utility can be launched to decrease the size of the corresponding
+partition so that the overall size of the disk image could be made
+smaller.  The size of the partition has to match with the size of the
+contained file system.
+.Bd -literal -offset indent
+# cfdisk
+.Ed
+.Pp
+Before leaving the
+.Cm cfdisk
+utility, take a note on the start sector of the free space after the
+resized partition because that shall indicate the new size of the disk
+image.  Multiply this number with the size of the sectors, which is
+512 bytes, to get the value to be passed for the
+.Xr truncate 1
+command for trimming the image.  In the following example, the free
+space started at sector 811008.
+.Bd -literal -offset indent
+# truncate -s 415236096 disk.img
+.Ed
+.Pp
+Restore the guest memory to the standard setting and restart the guest
+to make it pick up the changes in the disk parameters, also to give
+back the extra memory to the host.
+.Bd -literal -offset indent
+# wifibox restart guest
+.Ed
+.Sh INSTALLING OR REMOVING PACKAGES
+The list of installed packages can be queried by the
+.Sy apk
+(Alpine Package Keeper) tool.  This tool is going to be used for the
+rest of the section.
+.Bd -literal -offset indent
+# apk list --installed
+.Ed
+.Pp
+Before installing any package, it is recommended to get the latest
+version of the database.  The
+.Sy apk
+tool stores the list of currently used package repositories in the
+.Pa /etc/apk/repositories
+file.
+.Bd -literal -offset indent
+# apk update
+.Ed
+.Pp
+Individual packages can be then installed by the
+.Cm add
+command, assuming that they are available.  For example, in case of
+the
+.Sy wireless-tools
+package, this works as follows:
+.Bd -literal -offset indent
+# apk add wireless-tools
+.Ed
+.Pp
+The unneeded packages can be removed by the
+.Cm del
+command.
+.Bd -literal -offset indent
+# apk del wireless-tools
+.Ed
 .Sh PERFORMING UPGRADES
 It is possible to upgrade the operating system running on the guest to
 receive fixes for the kernel, drivers, and the userland programs.  The
@@ -244,44 +417,38 @@ As soon as everything is properly prepared, refresh the package index.
 # apk update
 .Ed
 .Pp
-Because the guest is configured with a small disk and due to that
-there is usually no space left for larger downloads, in-place upgrade
-of the kernel and the corresponding modules would fail.  To prevent
-this from happening, the kernel and its modules need to be removed by
-deleting the
-.Sy linux-lts
-package.  It stores files on the
+Because the upgrade would involve replacing the Linux kernel with a
+newer version, which is stored on the
 .Pa /boot
-file system, which needs to be made writeable for the transaction to
+file system, it needs to be made writeable for the transaction to
 succeed.
 .Bd -literal -offset indent
 # mount -o remount,rw /boot
-# apk del linux-lts
 .Ed
 .Pp
-The rest of the system can be upgraded in a single step by using the
+The system can be then upgraded in a single step by using the
 .Cm upgrade
 command.
 .Bd -literal -offset indent
 # apk upgrade --available
 .Ed
 .Pp
-After the upgrade process has successfully completed, the kernel and
-the modules have to be re-installed by adding the
-.Sy linux-lts
-package back.  The
+After the upgrade process has successfully completed, the
 .Pa /boot
 file system could be then made read-only again.
 .Bd -literal -offset indent
-# apk add linux-lts
 # mount -o remount,ro /boot
 .Ed
 .Pp
 Restart the guest for these changes to take effect.
+.Bd -literal -offset indent
+# wifibox restart guest
+.Ed
 .Sh CAVEATS
 Custom modifications to the published guest disk images are not
 supported.  Use these commands at your own risk!
 .Sh SEE ALSO
-.Xr wifibox 8
+.Xr wifibox 8 ,
+.Xr truncate 1
 .Sh AUTHORS
 .An Gábor Páli Aq Mt pali.gabor@gmail.com
