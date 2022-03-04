@@ -1,4 +1,4 @@
-.Dd February 8, 2022
+.Dd March 4, 2022
 .Dt WIFIBOX-ALPINE 5
 .Os
 .Sh NAME
@@ -96,22 +96,27 @@ file and implements a DHCP server for
 so that it can hand out IP addresses in a given range for the host and
 set itself the default gateway for forwarding the network traffic.  It
 also manages the distribution of information about the name servers.
+.It
+.Sy wpa_passthru
+works with the
+.Pa wpa_ctrl.conf
+file that is shared with the host and manages the forwarding of
+control sockets created for
+.Sy wpa_supplicant .
+When enabled, it attemps to parse the contents of
+.Pa wpa_supplicant.conf
+to learn if there are sockets available and exposes them over the
+configured TCP ports with the help of
+.Sy socat .
 .El
 .Pp
-The configuration files are read from the
+The generic configuration files are read from the
 .Pa /media/etc
 directory where the
 .Sy config
 9P (VirtFS) share is mounted in read-only mode.  From there, the files
 are hooked up in the system in the following ways.
 .Bl -bullet
-.It
-.Pa /media/etc/wpa_supplicant.conf
-is mapped to
-.Pa /etc/wpa_supplicant/wpa_supplicant.conf
-where
-.Sy wpa_supplicant
-will read its contents.
 .It
 .Pa /media/etc/interfaces.conf
 is mapped to
@@ -129,23 +134,41 @@ is mapped to
 where
 .Sy udhcpd
 will read its contents.
+.It
+.Pa /media/etc/wpa_ctrl.conf
+is not mapped to anywhere under
+.Pa /etc ,
+it is used directly from there by
+.Sy wpa_passthru .
 .El
+.Pp
+The
+.Pa wpa_supplicant.conf
+configuration file is shared with the host through the
+.Pa /media/wpa
+directory where the
+.Sy wpa_config
+9P (VirtFS) share is mounted writable.  This will let
+.Sy wpa_supplicant
+change the contents when instructed to do so from the host through the
+forwarded control sockets and permitted by the configuration.
 .Pp
 The variable data files under the guest's
 .Pa /var
 directory are shared with the host by mounting the
 .Sy var
-9P (VirtFS) share in the
-.Pa /media/var
-directory which is then mapped to there.  This includes streaming out all
-the logs under the
+9P (VirtFS) share there.  This includes streaming out all the logs
+under the
 .Pa /var/log
 directory, such as
 .Pa /var/log/dmesg
 or
 .Pa /var/log/messages
 so that the internal state of the guest can be tracked by accessing
-these files on the host.
+these files on the host.  The contents of the
+.Pa /var/run
+directory will not be visible on the host, as it is stored only in the
+memory.
 .Sh STARTING, STOPPING, AND RESTARTING SERVICES
 Every service running on the guest can be managed by the
 .Sy rc-service
@@ -191,7 +214,7 @@ achieved with the help of specific tools, described below shortly.
 .Pp
 Such operations must always be considered on two levels: the size of
 the disk image needs to be changed on the host, and the size of the
-file systems needs to be changed on the guest.  The order of the
+file system needs to be changed on the guest.  The order of the
 corresponding commands must always reflect the direction of the change
 in size to avoid losing data.
 .Pp
@@ -216,15 +239,9 @@ operation completed, the interactive
 .Cm cfdisk
 utility on the guest can be used to resize the partition of the root
 file system,
-.Pa /dev/vda2 .
+.Pa /dev/vda1 .
 .Bd -literal -offset indent
 # cfdisk
-.Ed
-.Pp
-The guest has to be restarted again to pick up the changes in the
-partition size.
-.Bd -literal -offset indent
-# wifibox restart guest
 .Ed
 .Pp
 The
@@ -236,7 +253,7 @@ the corresponding partition, which has been grown in the previous
 step.  After completion, the file system is ready for use.
 .Bd -literal -offset indent
 # mount -o remount,rw /
-# resize2fs /dev/vda2
+# resize2fs /dev/vda1
 .Ed
 .Pp
 For shrinking the root file system, the size of the root file system
@@ -313,19 +330,13 @@ be checked for errors first and it must be marked clean, otherwise
 .Cm resize2fs
 refuses to modify it.  Then the
 .Cm resize2fs
-command may be called with the new file system size, which shall not
-be smaller than the space currently occupied by files.  That is why it
-is a good idea to consult with the output of the
-.Cm df
-utility before moving forward.  If the file system cannot be shrunk to
-the specified size,
-.Cm resize2fs
-will exit with an error and recommends the user to repair with file
-system with
-.Cm e2fsck .
+command could be called with the
+.Fl M
+flag that shrinks the file system to the smallest possible size that
+is considered safe to use.
 .Bd -literal -offset indent
-# e2fsck -f /dev/vda2
-# resize2fs -f /dev/vda2 345M
+# e2fsck -f /dev/vda1
+# resize2fs -M /dev/vda1
 .Ed
 .Pp
 After the successful shrinking of the file system, the
@@ -333,7 +344,21 @@ After the successful shrinking of the file system, the
 utility can be launched to decrease the size of the corresponding
 partition so that the overall size of the disk image could be made
 smaller.  The size of the partition has to match with the size of the
-contained file system.
+contained file system.  That latter can be queried with using the
+.Cm dumpe2fs
+tool, in the following way for instance.
+.Bd -literal -offset indent
+# dumpe2fs -h /dev/vda1 | fgrep "Block count:" | cut -c27-
+.Ed
+.Pp
+This value has to be multipled by 8 to get the number of sectors for
+the new partition size.  This ratio comes from the difference of file
+system block size, which is 4096 bytes, and the sector size, which is
+512 bytes.  Once this is learnt,
+.Cm cfdisk
+could be launched to shrink the partition.  Remember to use
+.Sy S
+as the unit of measure.
 .Bd -literal -offset indent
 # cfdisk
 .Ed
@@ -346,9 +371,9 @@ image.  Multiply this number with the size of the sectors, which is
 512 bytes, to get the value to be passed for the
 .Xr truncate 1
 command for trimming the image.  In the following example, the free
-space started at sector 811008.
+space started at sector 745472.
 .Bd -literal -offset indent
-# truncate -s 415236096 disk.img
+# truncate -s `expr 745472 \\* 512` disk.img
 .Ed
 .Pp
 Restore the guest memory to the standard setting and restart the guest
@@ -366,7 +391,19 @@ rest of the section.
 # apk list --installed
 .Ed
 .Pp
-Before installing any package, it is recommended to get the latest
+Before installing any package, it is recommended to configure a default
+nameserver under
+.Pa /etc/resolv.conf ,
+e.g. as follows.
+.Bd -literal -offset indent
+# echo "nameserver 8.8.8.8" > /etc/resolv.conf
+.Ed
+.Pp
+At the same time, it is worth to note that the amount of memory
+configured for the guest might not be enough for the next steps, so
+raise it to around 128 MB if it has not been set like that already.
+.Pp
+Once prepared, it is possible to proceed with getting the latest
 version of the database.  The
 .Sy apk
 tool stores the list of currently used package repositories in the
@@ -417,15 +454,6 @@ As soon as everything is properly prepared, refresh the package index.
 # apk update
 .Ed
 .Pp
-Because the upgrade would involve replacing the Linux kernel with a
-newer version, which is stored on the
-.Pa /boot
-file system, it needs to be made writeable for the transaction to
-succeed.
-.Bd -literal -offset indent
-# mount -o remount,rw /boot
-.Ed
-.Pp
 The system can be then upgraded in a single step by using the
 .Cm upgrade
 command.
@@ -433,14 +461,8 @@ command.
 # apk upgrade --available
 .Ed
 .Pp
-After the upgrade process has successfully completed, the
-.Pa /boot
-file system could be then made read-only again.
-.Bd -literal -offset indent
-# mount -o remount,ro /boot
-.Ed
-.Pp
-Restart the guest for these changes to take effect.
+Restart the guest for these changes to take effect, especially if the
+kernel or the firmware files received an update.
 .Bd -literal -offset indent
 # wifibox restart guest
 .Ed
