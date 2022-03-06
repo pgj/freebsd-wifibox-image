@@ -1,4 +1,4 @@
-.Dd March 4, 2022
+.Dd March 7, 2022
 .Dt WIFIBOX-ALPINE 5
 .Os
 .Sh NAME
@@ -148,7 +148,7 @@ configuration file is shared with the host through the
 .Pa /media/wpa
 directory where the
 .Sy wpa_config
-9P (VirtFS) share is mounted writable.  This will let
+9P (VirtFS) share is mounted.  This will let
 .Sy wpa_supplicant
 change the contents when instructed to do so from the host through the
 forwarded control sockets and permitted by the configuration.
@@ -391,17 +391,9 @@ rest of the section.
 # apk list --installed
 .Ed
 .Pp
-Before installing any package, it is recommended to configure a default
-nameserver under
-.Pa /etc/resolv.conf ,
-e.g. as follows.
-.Bd -literal -offset indent
-# echo "nameserver 8.8.8.8" > /etc/resolv.conf
-.Ed
-.Pp
-At the same time, it is worth to note that the amount of memory
-configured for the guest might not be enough for the next steps, so
-raise it to around 128 MB if it has not been set like that already.
+Note that the amount of memory configured for the guest might not be
+enough for the next steps.  Raise it to around 128 MB if it has not
+been set like that already.
 .Pp
 Once prepared, it is possible to proceed with getting the latest
 version of the database.  The
